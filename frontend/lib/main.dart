@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geocoding/geocoding.dart' as geocoding;
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
@@ -16,6 +18,17 @@ const kPrimary = Color(0xFF0F0F1A); // Negro azulado
 const kAccent = Color(0xFFFF7A1A);  // Naranja CTA
 const kBg = Color(0xFFF6F7FB);
 const kGray = Color(0xFF8A8A9E);
+
+// Cambia aquí la URL del backend (Android emulador: http://10.0.2.2:8000, celular real: IP de tu PC)
+const kBaseUrl = 'http://127.0.0.1:8000';
+
+String _detalleError(String body) {
+  try {
+    final d = jsonDecode(body);
+    if (d is Map && d['detail'] != null) return d['detail'].toString();
+  } catch (_) {}
+  return body;
+}
 
 void _snack(BuildContext context, String msg, {Color color = kAccent}) {
   ScaffoldMessenger.of(context).showSnackBar(
@@ -106,7 +119,7 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
     try {
       final response = await http.post(
-        Uri.parse('http://127.0.0.1:8000/login'),
+        Uri.parse('$kBaseUrl/login'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'correo': _correoController.text.trim(),
@@ -118,6 +131,7 @@ class _LoginScreenState extends State<LoginScreen> {
         final data = jsonDecode(response.body);
         String nombreUsuario = data['usuario']['nombre'];
         String rolUsuario = data['usuario']['rol'];
+        final String idUsuario = data['usuario']['id_usuario']?.toString() ?? '';
         String tokenJwt = data['access_token'];
 
         if (mounted) {
@@ -125,8 +139,8 @@ class _LoginScreenState extends State<LoginScreen> {
             context,
             MaterialPageRoute(
               builder: (context) => rolUsuario == 'Profesional'
-                  ? MenuProfesional(nombreUsuario: nombreUsuario, token: tokenJwt)
-                  : MenuCliente(nombreUsuario: nombreUsuario, token: tokenJwt),
+                  ? MenuProfesional(nombreUsuario: nombreUsuario, token: tokenJwt, idUsuario: idUsuario)
+                  : MenuCliente(nombreUsuario: nombreUsuario, token: tokenJwt, idUsuario: idUsuario),
             ),
           );
         }
@@ -134,9 +148,10 @@ class _LoginScreenState extends State<LoginScreen> {
         if (mounted) _snack(context, 'Correo o contraseña incorrectos', color: Colors.red);
       }
     } catch (e) {
-      if (mounted) _snack(context, 'Error al conectar con el servidor.', color: Colors.orange[800]!);
+      debugPrint('Error en login: $e');
+      if (mounted) _snack(context, 'Error en el login: $e', color: Colors.orange[800]!);
     }
-    setState(() => _isLoading = false);
+    if (mounted) setState(() => _isLoading = false);
   }
 
   @override
@@ -207,7 +222,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     setState(() => _isLoading = true);
     try {
       final response = await http.post(
-        Uri.parse('http://127.0.0.1:8000/registro'),
+        Uri.parse('$kBaseUrl/registro'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'nombre': _nombreController.text.trim(),
@@ -275,7 +290,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
 class MenuCliente extends StatefulWidget {
   final String nombreUsuario;
   final String token;
-  const MenuCliente({super.key, required this.nombreUsuario, required this.token});
+  final String idUsuario;
+  const MenuCliente({super.key, required this.nombreUsuario, required this.token, required this.idUsuario});
 
   @override
   State<MenuCliente> createState() => _MenuClienteState();
@@ -283,52 +299,54 @@ class MenuCliente extends StatefulWidget {
 
 class _MenuClienteState extends State<MenuCliente> {
   final TextEditingController _buscadorController = TextEditingController();
+  int _mensajesSinLeer = 0;
+  Timer? _notifTimer;
 
   final List<Map<String, dynamic>> _categoriasPopulares = [
-    {
-      'titulo': 'Mantenimiento de Clima',
-      'query': 'clima',
-      'icono': Icons.ac_unit,
-      'color': const Color(0xFF2E3A59),
-    },
-    {
-      'titulo': 'Carpintería',
-      'query': 'carpintero',
-      'icono': Icons.construction,
-      'color': const Color(0xFF5D4037),
-    },
-    {
-      'titulo': 'Cerrajería',
-      'query': 'cerrajero',
-      'icono': Icons.vpn_key,
-      'color': const Color(0xFF37474F),
-    },
-    {
-      'titulo': 'Plomería',
-      'query': 'plomero',
-      'icono': Icons.plumbing,
-      'color': const Color(0xFF1E4C6E),
-    },
-    {
-      'titulo': 'Electricidad',
-      'query': 'electricista',
-      'icono': Icons.bolt,
-      'color': const Color(0xFF8C6D1F),
-    },
-    {
-      'titulo': 'Pintura',
-      'query': 'pintor',
-      'icono': Icons.format_paint,
-      'color': const Color(0xFF2E5B4B),
-    },
+    {'titulo': 'Mantenimiento de Clima', 'query': 'clima', 'icono': Icons.ac_unit, 'color': const Color(0xFF2E3A59)},
+    {'titulo': 'Carpintería', 'query': 'carpintero', 'icono': Icons.construction, 'color': const Color(0xFF5D4037)},
+    {'titulo': 'Cerrajería', 'query': 'cerrajero', 'icono': Icons.vpn_key, 'color': const Color(0xFF37474F)},
+    {'titulo': 'Plomería', 'query': 'plomero', 'icono': Icons.plumbing, 'color': const Color(0xFF1E4C6E)},
+    {'titulo': 'Electricidad', 'query': 'electricista', 'icono': Icons.bolt, 'color': const Color(0xFF8C6D1F)},
+    {'titulo': 'Pintura', 'query': 'pintor', 'icono': Icons.format_paint, 'color': const Color(0xFF2E5B4B)},
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _consultarNotificaciones();
+    _notifTimer = Timer.periodic(const Duration(seconds: 5), (_) => _consultarNotificaciones());
+  }
+
+  @override
+  void dispose() {
+    _notifTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _consultarNotificaciones() async {
+    try {
+      final response = await http.get(
+        Uri.parse('$kBaseUrl/notificaciones/resumen'),
+        headers: {'Authorization': 'Bearer ${widget.token}'},
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (mounted) {
+          setState(() {
+            _mensajesSinLeer = data['mensajes_sin_leer'] ?? 0;
+          });
+        }
+      }
+    } catch (_) {}
+  }
 
   void _irAlMapaConBusqueda(String query) {
     if (query.trim().isEmpty) return;
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => MapaServiciosScreen(busquedaInicial: query.trim()),
+        builder: (context) => MapaServiciosScreen(busquedaInicial: query.trim(), token: widget.token, idUsuario: widget.idUsuario),
       ),
     );
   }
@@ -359,12 +377,50 @@ class _MenuClienteState extends State<MenuCliente> {
                       ),
                     ],
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.logout, color: kPrimary),
-                    onPressed: () => Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(builder: (context) => const LoginScreen()),
-                    ),
+                  Row(
+                    children: [
+                      Stack(
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.chat_bubble_outline, color: kAccent, size: 28),
+                            tooltip: 'Mis Mensajes',
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => ListaChatsScreen(token: widget.token, idUsuario: widget.idUsuario),
+                                ),
+                              ).then((_) => _consultarNotificaciones());
+                            },
+                          ),
+                          if (_mensajesSinLeer > 0)
+                            Positioned(
+                              right: 6,
+                              top: 6,
+                              child: Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: const BoxDecoration(
+                                  color: Colors.red,
+                                  shape: BoxShape.circle,
+                                ),
+                                constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                                child: Text(
+                                  '$_mensajesSinLeer',
+                                  style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.logout, color: kPrimary),
+                        onPressed: () => Navigator.pushReplacement(
+                          context,
+                          MaterialPageRoute(builder: (context) => const LoginScreen()),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -473,29 +529,382 @@ class _MenuClienteState extends State<MenuCliente> {
 }
 
 // --- MENÚ DEL PROFESIONAL ---
-class MenuProfesional extends StatelessWidget {
+class MenuProfesional extends StatefulWidget {
   final String nombreUsuario;
   final String token;
-  const MenuProfesional({super.key, required this.nombreUsuario, required this.token});
+  final String idUsuario;
+  const MenuProfesional({super.key, required this.nombreUsuario, required this.token, required this.idUsuario});
+
+  @override
+  State<MenuProfesional> createState() => _MenuProfesionalState();
+}
+
+class _MenuProfesionalState extends State<MenuProfesional> {
+  int _solicitudesPendientesCount = 0;
+  int _mensajesSinLeerCount = 0;
+  Timer? _notifTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _obtenerConteoNotificaciones();
+    _notifTimer = Timer.periodic(const Duration(seconds: 5), (_) => _obtenerConteoNotificaciones());
+  }
+
+  @override
+  void dispose() {
+    _notifTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _obtenerConteoNotificaciones() async {
+    try {
+      final response = await http.get(
+        Uri.parse('$kBaseUrl/notificaciones/resumen'),
+        headers: {'Authorization': 'Bearer ${widget.token}'},
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (mounted) {
+          setState(() {
+            _solicitudesPendientesCount = data['solicitudes_pendientes'] ?? 0;
+            _mensajesSinLeerCount = data['mensajes_sin_leer'] ?? 0;
+          });
+        }
+      }
+    } catch (_) {}
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: _construirGrid(
-        nombreUsuario,
+        widget.nombreUsuario,
         'Panel de Trabajo',
         [
-          _ItemMenu('Servicios Pendientes', Icons.build, Colors.teal, () {}),
-          _ItemMenu('Mi Agenda', Icons.calendar_month, Colors.green, () {}),
-          _ItemMenu('Ganancias', Icons.attach_money, Colors.amber, () {}),
-          _ItemMenu('Mi Perfil Profesional', Icons.badge, Colors.indigo, () {
+          _ItemMenu('Solicitudes Pendientes', Icons.build, Colors.teal, _solicitudesPendientesCount, () {
             Navigator.push(
               context,
-              MaterialPageRoute(builder: (context) => EditarPerfilProfesionalScreen(token: token)),
+              MaterialPageRoute(builder: (context) => SolicitudesPendientesScreen(token: widget.token, idUsuario: widget.idUsuario)),
+            ).then((_) => _obtenerConteoNotificaciones());
+          }),
+          _ItemMenu('Mensajes / Chats', Icons.chat, Colors.orange, _mensajesSinLeerCount, () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => ListaChatsScreen(token: widget.token, idUsuario: widget.idUsuario)),
+            ).then((_) => _obtenerConteoNotificaciones());
+          }),
+          _ItemMenu('Ganancias', Icons.attach_money, Colors.amber, 0, () {}),
+          _ItemMenu('Mi Perfil Profesional', Icons.badge, Colors.indigo, 0, () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => EditarPerfilProfesionalScreen(token: widget.token)),
             );
           }),
         ],
       ),
+    );
+  }
+}
+
+// --- LISTA DE CHATS ACTIVOS ---
+class ListaChatsScreen extends StatefulWidget {
+  final String token;
+  final String idUsuario;
+  const ListaChatsScreen({super.key, required this.token, required this.idUsuario});
+
+  @override
+  State<ListaChatsScreen> createState() => _ListaChatsScreenState();
+}
+
+class _ListaChatsScreenState extends State<ListaChatsScreen> {
+  bool _cargando = true;
+  List<dynamic> _solicitudesAceptadas = [];
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _cargarChats();
+    _timer = Timer.periodic(const Duration(seconds: 5), (_) => _cargarChats(silencioso: true));
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _cargarChats({bool silencioso = false}) async {
+    if (!silencioso) setState(() => _cargando = true);
+    try {
+      final response = await http.get(
+        Uri.parse('$kBaseUrl/solicitudes/activas'),
+        headers: {'Authorization': 'Bearer ${widget.token}'},
+      );
+
+      if (!mounted) return;
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() => _solicitudesAceptadas = data['solicitudes'] ?? []);
+      } else if (!silencioso) {
+        _snack(context, _detalleError(response.body), color: Colors.red);
+      }
+    } catch (e) {
+      if (mounted && !silencioso) _snack(context, 'Error al cargar mensajes', color: Colors.red);
+    }
+    if (mounted) setState(() => _cargando = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Mis Mensajes'), backgroundColor: kPrimary, foregroundColor: Colors.white),
+      body: _cargando
+          ? const Center(child: CircularProgressIndicator(color: kAccent))
+          : _solicitudesAceptadas.isEmpty
+              ? const Center(child: Text('No tienes chats activos por el momento.', style: TextStyle(color: kGray)))
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _solicitudesAceptadas.length,
+                  itemBuilder: (context, index) {
+                    final item = _solicitudesAceptadas[index];
+                    final idSolicitud = item['id_solicitud'];
+                    final contraparte = item['nombre_contacto'] ?? 'Usuario';
+                    final bool tieneNuevos = (item['mensajes_sin_leer'] ?? 0) > 0;
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      child: ListTile(
+                        leading: Stack(
+                          children: [
+                            CircleAvatar(
+                              backgroundColor: kAccent.withOpacity(0.15),
+                              child: const Icon(Icons.person, color: kAccent),
+                            ),
+                            if (tieneNuevos)
+                              Positioned(
+                                right: 0,
+                                top: 0,
+                                child: Container(
+                                  width: 12,
+                                  height: 12,
+                                  decoration: BoxDecoration(
+                                    color: Colors.red,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(color: Colors.white, width: 2),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                        title: Text(contraparte, style: TextStyle(fontWeight: tieneNuevos ? FontWeight.w800 : FontWeight.bold)),
+                        subtitle: Text('Solicitud #$idSolicitud - ${item['descripcion_problema'] ?? ''}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                        trailing: tieneNuevos
+                            ? Container(
+                                padding: const EdgeInsets.all(6),
+                                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                                decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+                                child: Text(
+                                  '${item['mensajes_sin_leer']}',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                                ),
+                              )
+                            : const Icon(Icons.chevron_right, color: kGray),
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ChatScreen(
+                                titulo: contraparte,
+                                idSolicitud: idSolicitud,
+                                token: widget.token,
+                                idUsuarioActual: widget.idUsuario,
+                              ),
+                            ),
+                          ).then((_) => _cargarChats());
+                        },
+                      ),
+                    );
+                  },
+                ),
+    );
+  }
+}
+
+// --- PANTALLA PARA VER Y ACEPTAR/RECHAZAR SOLICITUDES (PROFESIONAL) ---
+class SolicitudesPendientesScreen extends StatefulWidget {
+  final String token;
+  final String idUsuario;
+  const SolicitudesPendientesScreen({super.key, required this.token, required this.idUsuario});
+
+  @override
+  State<SolicitudesPendientesScreen> createState() => _SolicitudesPendientesScreenState();
+}
+
+class _SolicitudesPendientesScreenState extends State<SolicitudesPendientesScreen> {
+  bool _cargando = true;
+  List<dynamic> _solicitudes = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _cargarSolicitudes();
+  }
+
+  Future<void> _cargarSolicitudes() async {
+    setState(() => _cargando = true);
+    try {
+      final response = await http.get(
+        Uri.parse('$kBaseUrl/solicitudes/pendientes'),
+        headers: {'Authorization': 'Bearer ${widget.token}'},
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() => _solicitudes = data['solicitudes'] ?? []);
+      }
+    } catch (e) {
+      if (mounted) _snack(context, 'Error al cargar solicitudes', color: Colors.red);
+    }
+    setState(() => _cargando = false);
+  }
+
+  Future<void> _responderSolicitud(int idSolicitud, String estado) async {
+    try {
+      final response = await http.put(
+        Uri.parse('$kBaseUrl/solicitudes/$idSolicitud/estado'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${widget.token}',
+        },
+        body: jsonEncode({'estado': estado}),
+      );
+
+      if (response.statusCode == 200) {
+        _snack(
+          context, 
+          estado == 'aceptado' ? '¡Solicitud aceptada! Abriendo chat...' : 'Solicitud rechazada', 
+          color: estado == 'aceptado' ? Colors.green : Colors.red
+        );
+
+        if (estado == 'aceptado' && mounted) {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => ChatScreen(
+                idSolicitud: idSolicitud,
+                token: widget.token,
+                idUsuarioActual: widget.idUsuario,
+              ),
+            ),
+          );
+        }
+
+        _cargarSolicitudes();
+      } else if (mounted) {
+        _snack(context, _detalleError(response.body), color: Colors.red);
+      }
+    } catch (e) {
+      if (mounted) _snack(context, 'Error al responder la solicitud', color: Colors.red);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Solicitudes Pendientes'), backgroundColor: kPrimary, foregroundColor: Colors.white),
+      body: _cargando
+          ? const Center(child: CircularProgressIndicator(color: kAccent))
+          : _solicitudes.isEmpty
+              ? const Center(child: Text('No tienes solicitudes pendientes.', style: TextStyle(color: kGray)))
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _solicitudes.length,
+                  itemBuilder: (context, index) {
+                    final item = _solicitudes[index];
+                    final clienteNombre = item['usuarios'] != null ? item['usuarios']['nombre'] : 'Cliente';
+                    final clienteTel = item['usuarios'] != null ? item['usuarios']['telefono'] : 'N/A';
+                    final direccion = item['direccion_texto'] ?? 'Dirección sin especificar';
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 16),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                CircleAvatar(
+                                  backgroundColor: kAccent.withOpacity(0.12),
+                                  child: const Icon(Icons.person, color: kAccent),
+                                ),
+                                const SizedBox(width: 12),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(clienteNombre, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                    Text('Tel: $clienteTel', style: const TextStyle(color: kGray, fontSize: 12)),
+                                  ],
+                                ),
+                              ],
+                            ),
+                            const Divider(height: 24),
+                            const Text('Descripción del problema:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: kPrimary)),
+                            const SizedBox(height: 4),
+                            Text(item['descripcion_problema'] ?? '', style: const TextStyle(fontSize: 14)),
+                            const SizedBox(height: 12),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Icon(Icons.location_on, size: 18, color: kAccent),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    direccion, 
+                                    style: const TextStyle(fontSize: 13, color: Colors.black87, fontWeight: FontWeight.w500)
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 18),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: OutlinedButton(
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: Colors.red,
+                                      side: const BorderSide(color: Colors.red),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    ),
+                                    onPressed: () => _responderSolicitud(item['id_solicitud'], 'rechazado'),
+                                    child: const Text('Rechazar'),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: ElevatedButton(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.green,
+                                      foregroundColor: Colors.white,
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    ),
+                                    onPressed: () => _responderSolicitud(item['id_solicitud'], 'aceptado'),
+                                    child: const Text('Aceptar'),
+                                  ),
+                                ),
+                              ],
+                            )
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
     );
   }
 }
@@ -551,13 +960,12 @@ class _EditarPerfilProfesionalScreenState extends State<EditarPerfilProfesionalS
     try {
       var request = http.MultipartRequest(
         'PUT',
-        Uri.parse('http://127.0.0.1:8000/profesionales/perfil'),
+        Uri.parse('$kBaseUrl/profesionales/perfil'),
       );
 
       request.headers['Authorization'] = 'Bearer ${widget.token}';
       request.fields['descripcion'] = _descripcionController.text.trim();
 
-      // Adjuntar archivos con MediaType explícito
       await _adjuntarArchivo(request, 'foto_1', _foto1);
       await _adjuntarArchivo(request, 'foto_2', _foto2);
       await _adjuntarArchivo(request, 'foto_3', _foto3);
@@ -571,20 +979,11 @@ class _EditarPerfilProfesionalScreenState extends State<EditarPerfilProfesionalS
           Navigator.pop(context);
         }
       } else {
-        print('=== ERROR SERVIDOR (${response.statusCode}) ===');
-        print(response.body);
-
         if (mounted) {
-          _snack(
-            context, 
-            'Error (${response.statusCode}): ${response.body}', 
-            color: Colors.red,
-          );
+          _snack(context, 'Error (${response.statusCode}): ${response.body}', color: Colors.red);
         }
       }
     } catch (e) {
-      print('=== ERROR DE CONEXIÓN ===');
-      print(e);
       if (mounted) {
         _snack(context, 'Error de conexión: $e', color: Colors.orange[800]!);
       }
@@ -673,7 +1072,9 @@ class _EditarPerfilProfesionalScreenState extends State<EditarPerfilProfesionalS
 // --- PANTALLA DEL MAPA Y BUSCADOR ---
 class MapaServiciosScreen extends StatefulWidget {
   final String? busquedaInicial;
-  const MapaServiciosScreen({super.key, this.busquedaInicial});
+  final String token;
+  final String idUsuario;
+  const MapaServiciosScreen({super.key, this.busquedaInicial, required this.token, required this.idUsuario});
 
   @override
   State<MapaServiciosScreen> createState() => _MapaServiciosScreenState();
@@ -727,7 +1128,12 @@ class _MapaServiciosScreenState extends State<MapaServiciosScreen> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => PerfilProfesionalDetalleScreen(profesional: prof),
+        builder: (context) => PerfilProfesionalDetalleScreen(
+          profesional: prof,
+          posicionCliente: _posicionActual,
+          token: widget.token,
+          idUsuario: widget.idUsuario,
+        ),
       ),
     );
   }
@@ -743,7 +1149,7 @@ class _MapaServiciosScreenState extends State<MapaServiciosScreen> {
       final lat = _posicionActual!.latitude;
       final lng = _posicionActual!.longitude;
       final response = await http.get(
-        Uri.parse('http://127.0.0.1:8000/profesionales/cercanos?lat=$lat&lng=$lng&radio=15.0&busqueda=$busqueda'),
+        Uri.parse('$kBaseUrl/profesionales/cercanos?lat=$lat&lng=$lng&radio=15.0&busqueda=$busqueda'),
       );
 
       if (response.statusCode == 200) {
@@ -902,22 +1308,179 @@ class _MapaServiciosScreenState extends State<MapaServiciosScreen> {
 }
 
 // --- PANTALLA COMPLETA DE DETALLE DEL PROFESIONAL ---
-class PerfilProfesionalDetalleScreen extends StatelessWidget {
+class PerfilProfesionalDetalleScreen extends StatefulWidget {
   final dynamic profesional;
-  const PerfilProfesionalDetalleScreen({super.key, required this.profesional});
+  final LatLng? posicionCliente;
+  final String token;
+  final String idUsuario;
+
+  const PerfilProfesionalDetalleScreen({
+    super.key, 
+    required this.profesional, 
+    this.posicionCliente,
+    required this.token,
+    required this.idUsuario,
+  });
+
+  @override
+  State<PerfilProfesionalDetalleScreen> createState() => _PerfilProfesionalDetalleScreenState();
+}
+
+class _PerfilProfesionalDetalleScreenState extends State<PerfilProfesionalDetalleScreen> {
+  final TextEditingController _problemaController = TextEditingController();
+  bool _enviandoSolicitud = false;
+
+  Future<String> _obtenerDireccionTexto(double lat, double lng) async {
+    try {
+      final url = Uri.parse('https://nominatim.openstreetmap.org/reverse?format=json&lat=$lat&lon=$lng');
+      final res = await http.get(
+        url, 
+        headers: {'User-Agent': 'ServinowApp/1.0 (contacto@servinow.com)'}
+      );
+      
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final address = data['address'] ?? {};
+        
+        String calle = address['road'] ?? address['pedestrian'] ?? '';
+        String numero = address['house_number'] ?? '';
+        String colonia = address['suburb'] ?? address['neighbourhood'] ?? '';
+        String ciudad = address['city'] ?? address['town'] ?? address['village'] ?? '';
+
+        String dir = '$calle $numero, $colonia, $ciudad'.replaceAll(RegExp(r'^\s*,\s*'), '').trim();
+        return dir.isNotEmpty ? dir : "Coordenadas: $lat, $lng";
+      }
+    } catch (e) {
+      debugPrint("Error al obtener dirección HTTP: $e");
+    }
+    return "Ubicación GPS ($lat, $lng)";
+  }
+
+  void _mostrarModalSolicitud(BuildContext context) async {
+    if (widget.posicionCliente == null) {
+      _snack(context, 'No se tiene la ubicación actual del GPS.', color: Colors.orange[800]!);
+      return;
+    }
+
+    _snack(context, 'Obteniendo tu dirección actual...');
+    String direccionCalculada = await _obtenerDireccionTexto(
+      widget.posicionCliente!.latitude, 
+      widget.posicionCliente!.longitude
+    );
+
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (context) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+            left: 20,
+            right: 20,
+            top: 24,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Solicitar Servicio', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(12)),
+                child: Row(
+                  children: [
+                    const Icon(Icons.location_on, color: kAccent),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Tu dirección asignada:\n$direccionCalculada',
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text('Describe tu problema:', style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _problemaController,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  hintText: 'Ej. Necesito arreglar una fuga de agua en el baño principal...',
+                ),
+              ),
+              const SizedBox(height: 20),
+              StatefulBuilder(
+                builder: (context, setModalState) {
+                  return _button(
+                    'Enviar Solicitud', 
+                    _enviandoSolicitud, 
+                    _enviandoSolicitud ? null : () async {
+                      if (_problemaController.text.trim().isEmpty) {
+                        _snack(context, 'Escribe la descripción de tu problema.', color: Colors.orange[800]!);
+                        return;
+                      }
+
+                      setModalState(() => _enviandoSolicitud = true);
+                      
+                      try {
+                        final response = await http.post(
+                          Uri.parse('$kBaseUrl/solicitudes'),
+                          headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': 'Bearer ${widget.token}',
+                          },
+                          body: jsonEncode({
+                            'id_profesional': widget.profesional['id_profesional'],
+                            'descripcion_problema': _problemaController.text.trim(),
+                            'direccion_texto': direccionCalculada,
+                            'latitud': widget.posicionCliente!.latitude,
+                            'longitud': widget.posicionCliente!.longitude,
+                          }),
+                        );
+
+                        if (response.statusCode == 200) {
+                          if (mounted) {
+                            Navigator.pop(context); // Cierra modal
+                            _snack(context, '¡Solicitud enviada! Espera a que el profesional la acepte.', color: Colors.green);
+                            _problemaController.clear();
+                          }
+                        } else {
+                          if (mounted) _snack(context, 'Error al enviar la solicitud', color: Colors.red);
+                        }
+                      } catch (e) {
+                        if (mounted) _snack(context, 'Error de conexión', color: Colors.red);
+                      } finally {
+                        setModalState(() => _enviandoSolicitud = false);
+                      }
+                    }
+                  );
+                }
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final String nombre = profesional['usuarios']['nombre'] ?? 'Profesional';
-    final String oficio = profesional['oficio'] ?? 'Sin especificar';
-    final String telefono = profesional['usuarios']['telefono'] ?? 'N/A';
-    final String descripcion = profesional['descripcion'] ?? '';
-    final String distancia = '${profesional['distancia_km'] ?? '0.0'} km';
+    final String nombre = widget.profesional['usuarios']['nombre'] ?? 'Profesional';
+    final String oficio = widget.profesional['oficio'] ?? 'Sin especificar';
+    final String telefono = widget.profesional['usuarios']['telefono'] ?? 'N/A';
+    final String descripcion = widget.profesional['descripcion'] ?? '';
+    final String distancia = '${widget.profesional['distancia_km'] ?? '0.0'} km';
 
     List<String> fotos = [];
-    if (profesional['foto_1'] != null && profesional['foto_1'].toString().trim().isNotEmpty) fotos.add(profesional['foto_1']);
-    if (profesional['foto_2'] != null && profesional['foto_2'].toString().trim().isNotEmpty) fotos.add(profesional['foto_2']);
-    if (profesional['foto_3'] != null && profesional['foto_3'].toString().trim().isNotEmpty) fotos.add(profesional['foto_3']);
+    if (widget.profesional['foto_1'] != null && widget.profesional['foto_1'].toString().trim().isNotEmpty) fotos.add(widget.profesional['foto_1']);
+    if (widget.profesional['foto_2'] != null && widget.profesional['foto_2'].toString().trim().isNotEmpty) fotos.add(widget.profesional['foto_2']);
+    if (widget.profesional['foto_3'] != null && widget.profesional['foto_3'].toString().trim().isNotEmpty) fotos.add(widget.profesional['foto_3']);
 
     return Scaffold(
       appBar: AppBar(
@@ -1037,9 +1600,233 @@ class PerfilProfesionalDetalleScreen extends StatelessWidget {
               borderRadius: const BorderRadius.only(topLeft: Radius.circular(24), topRight: Radius.circular(24)),
             ),
             child: SafeArea(
-              child: _button('Solicitar servicio', false, () {
-                _snack(context, 'Próximamente: Redirigir a pantalla de chat / mensajes');
-              }),
+              child: _button('Solicitar servicio', false, () => _mostrarModalSolicitud(context)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// --- PANTALLA DE CHAT ---
+class ChatScreen extends StatefulWidget {
+  final int idSolicitud;
+  final String token;
+  final String idUsuarioActual;
+  final String? titulo;
+
+  const ChatScreen({
+    super.key,
+    required this.idSolicitud,
+    required this.token,
+    required this.idUsuarioActual,
+    this.titulo,
+  });
+
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final TextEditingController _mensajeController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  List<dynamic> _mensajes = [];
+  bool _cargando = true;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _cargarMensajes();
+    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _cargarMensajes());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _mensajeController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _scrollAlFinal() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOut,
+    );
+  }
+
+  bool _esMio(dynamic msg) {
+    final raw = msg['id_emisor'];
+    return raw != null && raw.toString() == widget.idUsuarioActual.toString();
+  }
+
+  String _hora(dynamic iso) {
+    final dt = DateTime.tryParse(iso?.toString() ?? '')?.toLocal();
+    if (dt == null) return '';
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _cargarMensajes() async {
+    final url = Uri.parse('$kBaseUrl/solicitudes/${widget.idSolicitud}/mensajes');
+    try {
+      final res = await http.get(url, headers: {'Authorization': 'Bearer ${widget.token}'});
+      if (!mounted) return;
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final nuevos = (data['mensajes'] as List?) ?? [];
+        final huboCambio = nuevos.length != _mensajes.length;
+        setState(() {
+          _mensajes = nuevos;
+          _cargando = false;
+        });
+        if (huboCambio) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => _scrollAlFinal());
+        }
+      } else if (_cargando) {
+        setState(() => _cargando = false);
+        _snack(context, _detalleError(res.body), color: Colors.red);
+      }
+    } catch (e) {
+      debugPrint("Error al consultar mensajes: $e");
+    }
+  }
+
+  Future<void> _enviarMensaje() async {
+    final texto = _mensajeController.text.trim();
+    if (texto.isEmpty) return;
+
+    _mensajeController.clear();
+    final url = Uri.parse('$kBaseUrl/solicitudes/${widget.idSolicitud}/mensajes');
+
+    try {
+      final res = await http.post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${widget.token}',
+        },
+        body: jsonEncode({'contenido': texto}),
+      );
+
+      if (res.statusCode == 200) {
+        _cargarMensajes();
+      } else {
+        _mensajeController.text = texto; // no perder lo escrito
+        if (mounted) _snack(context, _detalleError(res.body), color: Colors.red);
+      }
+    } catch (e) {
+      _mensajeController.text = texto;
+      if (mounted) _snack(context, 'Error de conexión al enviar el mensaje', color: Colors.red);
+    }
+  }
+
+  Widget _burbuja(dynamic msg) {
+    final bool esMio = _esMio(msg);
+    final String hora = _hora(msg['fecha_envio']);
+
+    return Align(
+      alignment: esMio ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
+        margin: const EdgeInsets.symmetric(vertical: 4.0),
+        padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 10.0),
+        decoration: BoxDecoration(
+          // Mío: naranja a la derecha. Del otro: gris azulado a la izquierda.
+          color: esMio ? kAccent : const Color(0xFFE3E6F0),
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(16.0),
+            topRight: const Radius.circular(16.0),
+            bottomLeft: esMio ? const Radius.circular(16.0) : Radius.zero,
+            bottomRight: esMio ? Radius.zero : const Radius.circular(16.0),
+          ),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 4, offset: const Offset(0, 2)),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: esMio ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            Text(
+              (msg['contenido'] ?? '').toString(),
+              style: TextStyle(fontSize: 14.5, color: esMio ? Colors.white : kPrimary),
+            ),
+            if (hora.isNotEmpty) ...[
+              const SizedBox(height: 3),
+              Text(
+                hora,
+                style: TextStyle(fontSize: 10, color: esMio ? Colors.white70 : kGray),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.titulo ?? 'Chat - Solicitud #${widget.idSolicitud}'),
+        backgroundColor: kPrimary,
+        foregroundColor: Colors.white,
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: _cargando
+                ? const Center(child: CircularProgressIndicator(color: kAccent))
+                : _mensajes.isEmpty
+                    ? const Center(
+                        child: Text('No hay mensajes aún. ¡Escribe el primero!', style: TextStyle(color: kGray)),
+                      )
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.all(16.0),
+                        itemCount: _mensajes.length,
+                        itemBuilder: (context, index) => _burbuja(_mensajes[index]),
+                      ),
+          ),
+          Container(
+            padding: const EdgeInsets.all(12.0),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, -3)),
+              ],
+            ),
+            child: SafeArea(
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _mensajeController,
+                      decoration: const InputDecoration(
+                        hintText: 'Escribe un mensaje...',
+                        hintStyle: TextStyle(color: kGray, fontSize: 14),
+                        border: InputBorder.none,
+                        filled: false,
+                        contentPadding: EdgeInsets.symmetric(horizontal: 12),
+                      ),
+                      onSubmitted: (_) => _enviarMensaje(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  CircleAvatar(
+                    backgroundColor: kAccent,
+                    child: IconButton(
+                      icon: const Icon(Icons.send, color: Colors.white, size: 20),
+                      onPressed: _enviarMensaje,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -1053,8 +1840,9 @@ class _ItemMenu {
   final String titulo;
   final IconData icono;
   final Color color;
+  final int badgeCount;
   final VoidCallback onTap;
-  _ItemMenu(this.titulo, this.icono, this.color, this.onTap);
+  _ItemMenu(this.titulo, this.icono, this.color, this.badgeCount, this.onTap);
 }
 
 Widget _construirGrid(String nombreUsuario, String subtitulo, List<_ItemMenu> items) {
@@ -1103,16 +1891,40 @@ Widget _construirGrid(String nombreUsuario, String subtitulo, List<_ItemMenu> it
                   child: InkWell(
                     onTap: item.onTap,
                     borderRadius: BorderRadius.circular(18),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    child: Stack(
                       children: [
-                        Container(
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(color: item.color.withOpacity(0.12), shape: BoxShape.circle),
-                          child: Icon(item.icono, size: 30, color: item.color),
+                        Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(color: item.color.withOpacity(0.12), shape: BoxShape.circle),
+                                child: Icon(item.icono, size: 30, color: item.color),
+                              ),
+                              const SizedBox(height: 12),
+                              Text(item.titulo, textAlign: TextAlign.center, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
                         ),
-                        const SizedBox(height: 12),
-                        Text(item.titulo, textAlign: TextAlign.center, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                        if (item.badgeCount > 0)
+                          Positioned(
+                            top: 12,
+                            right: 12,
+                            child: Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: const BoxDecoration(
+                                color: Colors.red,
+                                shape: BoxShape.circle,
+                              ),
+                              constraints: const BoxConstraints(minWidth: 22, minHeight: 22),
+                              child: Text(
+                                '${item.badgeCount}',
+                                style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ),
                       ],
                     ),
                   ),

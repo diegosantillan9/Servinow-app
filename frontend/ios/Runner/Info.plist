@@ -26,6 +26,12 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>ServiNow necesita tu ubicacion</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>ServiNow necesita tu ubicacion</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>ServiNow necesita tu ubicacion</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
